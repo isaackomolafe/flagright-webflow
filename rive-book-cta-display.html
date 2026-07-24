@@ -1,0 +1,110 @@
+<!--
+  Webflow embed: drive per-book CTA card visibility off the Rive "book" data-bound
+  number property (ViewModel1 -> book, 1-8), using GSAP for the show/hide transition.
+
+  How the rive file's ViewModel1 -> "book" input works: 1 = book 1 ... 8 = book 8.
+  Whenever that number changes (via the file's own autoplay loop or a click on a book),
+  this script fades the matching ".press-featured-card.book-N" wrapper in and fades
+  every other one out.
+
+  Setup in Webflow:
+
+  1. Site Settings > Custom Code > Head Code - paste the two <script src> tags below
+     once for the whole site (skip if GSAP/Rive are already loaded there).
+
+  2. On the page with the Rive embed, give the actual <canvas> (or the Embed element
+     wrapping it) the ID "book-rive-canvas". In Webflow: select the element ->
+     Element Settings (gear icon) -> ID field.
+
+  3. Confirm the 8 CTA cards already exist with the combo classes described:
+     "press-featured-card book-1" ... "press-featured-card book-8".
+
+  4. Page Settings > Custom Code > Before </body> tag - paste the <style> + <script>
+     block below. Replace REPLACE_WITH_YOUR_RIV_FILE_URL with the hosted .riv URL
+     (Webflow Asset Manager URL, or wherever the file is hosted).
+
+  5. In Rive, double check "Artboard" has "ViewModel1" set as its default view model
+     instance - that's what lets `autoBind: true` pick up the "book" number property
+     automatically, with no manual instance wiring.
+-->
+
+<!-- ============ 1) Head Code (once per site) ============ -->
+<script src="https://unpkg.com/@rive-app/canvas@2.39.0"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+
+<!-- ============ 2) Before </body> tag (this page) ============ -->
+<style>
+  /* Hide every CTA card until the script decides which one to reveal,
+     so all 8 don't flash on load before Rive reports the current book. */
+  .press-featured-card {
+    opacity: 0;
+    pointer-events: none;
+  }
+</style>
+
+<script>
+(function () {
+  var CANVAS_ID = "book-rive-canvas";
+  var CTA_SELECTOR = ".press-featured-card";
+  var TOTAL_BOOKS = 8;
+  var RIVE_SRC = "REPLACE_WITH_YOUR_RIV_FILE_URL";
+
+  document.addEventListener("DOMContentLoaded", function () {
+    var canvas = document.getElementById(CANVAS_ID);
+    if (!canvas) {
+      console.warn("[rive-book-cta] canvas #" + CANVAS_ID + " not found on this page");
+      return;
+    }
+
+    var cards = gsap.utils.toArray(CTA_SELECTOR);
+    var current = null;
+
+    function showBook(num) {
+      num = Math.min(TOTAL_BOOKS, Math.max(1, Math.round(num)));
+      if (num === current) return;
+      current = num;
+
+      cards.forEach(function (card) {
+        var isMatch = card.classList.contains("book-" + num);
+        gsap.killTweensOf(card);
+        gsap.set(card, { pointerEvents: isMatch ? "auto" : "none" });
+        gsap.to(card, {
+          opacity: isMatch ? 1 : 0,
+          duration: isMatch ? 0.4 : 0.3,
+          ease: "power1.out"
+        });
+      });
+    }
+
+    var r = new rive.Rive({
+      src: RIVE_SRC,
+      canvas: canvas,
+      autoplay: true,
+      stateMachines: "State Machine 1",
+      autoBind: true,
+      onLoad: function () {
+        var vmi = r.viewModelInstance;
+        if (!vmi) {
+          console.warn("[rive-book-cta] no default view model bound - check the artboard's default ViewModel in Rive");
+          return;
+        }
+
+        var bookProp = vmi.number("book");
+        if (!bookProp) {
+          console.warn('[rive-book-cta] number property "book" not found on ViewModel1');
+          return;
+        }
+
+        // Show whichever book is already active as soon as we bind (covers a
+        // mid-loop page load), then react to every subsequent change - the
+        // same "book" property updates whether it's the autoplay loop or a
+        // click on a book driving the state machine.
+        showBook(bookProp.value);
+        bookProp.on(function (event) {
+          showBook(event.data);
+        });
+      }
+    });
+  });
+})();
+</script>
