@@ -1,0 +1,241 @@
+<!--
+  Webflow embed: drive per-book CTA card visibility off the Rive "book" data-bound
+  number property (ViewModel1 -> book, 1-8), using GSAP for the show/hide transition.
+
+  How the rive file's ViewModel1 -> "book" input works: 1 = book 1 ... 8 = book 8.
+  Whenever that number changes (via the file's own autoplay loop or a click on a book),
+  this script fades the matching ".press-featured-card.book-N" wrapper in and fades
+  every other one out.
+
+  The "book" value flips the instant the rive book-to-book transition *starts*, not
+  when it finishes, so the script waits TRANSITION_DELAY seconds before swapping the
+  CTA - keeping the CTA in sync with the slide instead of jumping in early. It also
+  ignores any book value that gets superseded by another before that delay elapses,
+  which is what happens when you click a book several slides away and the artwork
+  visually passes through the ones in between on its way there - only the book you
+  actually land on gets a CTA.
+
+  TRANSITION_DELAY is a guess (see the constant near the top of the <script> block)
+  since the exact timing lives inside the .riv file's state machine, not in this
+  script. Tune it by watching the console: every "showing book N" line is a CTA that
+  actually appeared. If you still see CTAs for books you only passed through on the
+  way to a click target, raise TRANSITION_DELAY. If the CTA feels late relative to
+  the slide finishing, lower it - just keep it comfortably below the real per-book
+  hold time (4.5s per your timing) so normal autoplay still feels instant.
+
+  Also includes a fix for blurry rive rendering when the canvas is styled to fill a
+  responsive container (width/height: 100%) - the canvas's internal pixel buffer is
+  kept in sync with its on-screen size and devicePixelRatio via
+  resizeDrawingSurfaceToCanvas(), both on load and on any future resize.
+
+  Wired for this exact markup:
+    <div id="press-hero" class="press-featured-rive">
+      <canvas id="press-rive-canvas"></canvas>
+    </div>
+    <div class="press-featured-card book-1">...</div> ... book-8
+  .riv source: https://cdn.prod.website-files.com/64f420094266acf96b6d3f84/6a5c8dcbc665c6e54962b20d_flagright_press_hero.riv
+
+  Setup in Webflow:
+
+  1. Site Settings > Custom Code > Head Code - paste the two <script src> tags below
+     once for the whole site (skip if GSAP/Rive are already loaded there).
+
+  2. Page Settings > Custom Code > Before </body> tag (on the page with the Rive
+     embed) - paste the <style> + <script> block below as-is, no placeholders left
+     to fill in.
+
+  3. Publish the site. Custom code changes do not apply until you publish, even if
+     the canvas/CTAs already look right in the Designer/preview.
+
+  4. In Rive, double check "Artboard" has "ViewModel1" set as its default view model
+     instance - that's what lets `autoBind: true` pick up the "book" number property
+     automatically, with no manual instance wiring. If it isn't the default, the
+     console will log "no default view model bound".
+
+  Debugging: open the browser console on the live page. This script logs exactly
+  where it stops (canvas missing / no view model / no "book" property / rive load
+  error) and logs every book change it applies, so a silent "nothing happens" case
+  should no longer be silent.
+-->
+
+<!-- ============ 1) Head Code (once per site) ============ -->
+<script src="https://unpkg.com/@rive-app/canvas@2.39.0"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+
+<!-- ============ 2) Before </body> tag (this page) ============ -->
+<style>
+  /* Hide every CTA card until the script decides which one to reveal,
+     so all 8 don't flash on load before Rive reports the current book. */
+  .press-featured-card {
+    opacity: 0;
+    pointer-events: none;
+  }
+</style>
+
+<script>
+(function () {
+  var CANVAS_ID = "press-rive-canvas";
+  var CTA_SELECTOR = ".press-featured-card";
+  var TOTAL_BOOKS = 8;
+  var RIVE_SRC = "https://cdn.prod.website-files.com/64f420094266acf96b6d3f84/6a5c8dcbc665c6e54962b20d_flagright_press_hero.riv";
+  var LOG_PREFIX = "[rive-book-cta]";
+
+  document.addEventListener("DOMContentLoaded", function () {
+    if (typeof gsap === "undefined") {
+      console.error(LOG_PREFIX, "gsap is not loaded - check the Head Code script tag/order");
+      return;
+    }
+    if (typeof rive === "undefined") {
+      console.error(LOG_PREFIX, "rive is not loaded - check the Head Code script tag/order");
+      return;
+    }
+
+    var canvas = document.getElementById(CANVAS_ID);
+    if (!canvas) {
+      console.error(LOG_PREFIX, "canvas #" + CANVAS_ID + " not found on this page");
+      return;
+    }
+
+    var cards = gsap.utils.toArray(CTA_SELECTOR);
+    if (!cards.length) {
+      console.warn(LOG_PREFIX, "no elements matched " + CTA_SELECTOR + " - CTA cards not found yet?");
+    }
+
+    // How long (seconds) a book value has to stay put before its CTA appears.
+    // Needs to clear two different things: (1) the rive book-to-book slide
+    // transition itself, so the CTA doesn't jump in before the slide finishes,
+    // and (2) any books the artwork visually passes through on its way to a
+    // clicked target several books away, which also show up as real (if
+    // brief) "book" value changes. See the file header comment for how to
+    // tune this - it's a guess, not a value read from the .riv file.
+    var TRANSITION_DELAY = 1;
+
+    var current = null;      // book number currently shown on screen
+    var pendingTarget = null; // book number queued to show once the delay elapses
+    var pendingCall = null;   // gsap.delayedCall for that queued swap
+
+    function applyBook(num) {
+      current = num;
+      console.log(LOG_PREFIX, "showing book", num);
+
+      cards.forEach(function (card) {
+        var isMatch = card.classList.contains("book-" + num);
+        gsap.killTweensOf(card);
+        gsap.set(card, { pointerEvents: isMatch ? "auto" : "none" });
+        gsap.to(card, {
+          opacity: isMatch ? 1 : 0,
+          duration: isMatch ? 0.4 : 0.3,
+          ease: "power1.out"
+        });
+      });
+    }
+
+    function showBook(num, immediate) {
+      // Rive can report a transient NaN for a frame or two around a value
+      // change - ignore those instead of treating them as "no book selected"
+      // (which was hiding every card immediately after it faded in).
+      if (typeof num !== "number" || Number.isNaN(num)) return;
+      num = Math.min(TOTAL_BOOKS, Math.max(1, Math.round(num)));
+
+      if (immediate) {
+        if (pendingCall) pendingCall.kill();
+        pendingCall = null;
+        pendingTarget = null;
+        if (num !== current) applyBook(num);
+        return;
+      }
+
+      if (num === current || num === pendingTarget) return;
+
+      // A new target book - (re)schedule the swap so the CTA appears in sync
+      // with the end of Rive's own transition, not the instant the "book"
+      // data value changes. Rescheduling (rather than letting an older timer
+      // fire) is what skips CTAs for books only passed through on the way to
+      // a click target further away - each one gets bumped by the next
+      // before its own timer has a chance to fire.
+      if (pendingCall) {
+        console.log(LOG_PREFIX, "skipped book", pendingTarget, "- superseded by", num, "before it settled");
+        pendingCall.kill();
+      }
+      pendingTarget = num;
+      pendingCall = gsap.delayedCall(TRANSITION_DELAY, function () {
+        pendingCall = null;
+        pendingTarget = null;
+        applyBook(num);
+      });
+    }
+
+    // A canvas styled to fill a responsive container (width/height: 100%)
+    // still renders at its default/last-set pixel buffer size unless that
+    // buffer is kept in sync with the box it's actually displayed at - that
+    // mismatch is what shows up as blur. Rive's own resize hook needs the
+    // buffer set first, then to be told about it.
+    var r = null;
+
+    function syncCanvasResolution() {
+      if (!r) return;
+      var dpr = window.devicePixelRatio || 1;
+      var rect = canvas.getBoundingClientRect();
+      var width = Math.max(1, Math.round(rect.width * dpr));
+      var height = Math.max(1, Math.round(rect.height * dpr));
+      if (canvas.width === width && canvas.height === height) return;
+      canvas.width = width;
+      canvas.height = height;
+      r.resizeDrawingSurfaceToCanvas();
+    }
+
+    if (typeof ResizeObserver !== "undefined") {
+      new ResizeObserver(syncCanvasResolution).observe(canvas);
+    } else {
+      window.addEventListener("resize", syncCanvasResolution);
+    }
+
+    r = new rive.Rive({
+      src: RIVE_SRC,
+      canvas: canvas,
+      autoplay: true,
+      stateMachines: "State Machine 1",
+      autoBind: true,
+      onLoadError: function (err) {
+        console.error(LOG_PREFIX, "failed to load .riv file", err);
+      },
+      onLoad: function () {
+        syncCanvasResolution();
+
+        var vmi = r.viewModelInstance;
+        if (!vmi) {
+          console.error(LOG_PREFIX, "no default view model bound - open the .riv in Rive and set ViewModel1 as the Artboard's default view model");
+          return;
+        }
+
+        var bookProp = vmi.number("book");
+        if (!bookProp) {
+          console.error(LOG_PREFIX, 'number property "book" not found on ViewModel1 - check the exact property name/casing');
+          return;
+        }
+
+        console.log(LOG_PREFIX, "bound to ViewModel1.book, initial value:", bookProp.value);
+
+        // Show whichever book is already active as soon as we bind (covers a
+        // mid-loop page load) - no transition delay here, there's no slide
+        // animation to wait for on first paint. Every subsequent change (loop
+        // or click) goes through the delayed path in showBook().
+        showBook(bookProp.value, true);
+        // Re-read bookProp.value directly rather than trusting the event
+        // payload shape - more reliable across Rive runtime versions.
+        bookProp.on(function () {
+          showBook(bookProp.value);
+        });
+
+        // Belt-and-suspenders: also poll every tick in case this Rive build's
+        // .on() observer doesn't fire for changes driven internally by the
+        // state machine. showBook() is idempotent (no-ops when unchanged),
+        // so this is safe to run alongside the event subscription above.
+        gsap.ticker.add(function () {
+          showBook(bookProp.value);
+        });
+      }
+    });
+  });
+})();
+</script>
