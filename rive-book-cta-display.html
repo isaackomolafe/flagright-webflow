@@ -7,6 +7,12 @@
   this script fades the matching ".press-featured-card.book-N" wrapper in and fades
   every other one out.
 
+  The "book" value flips the instant the rive book-to-book transition *starts*, not
+  when it finishes, so the script waits TRANSITION_DELAY seconds (set to match the
+  rive file's own transition length) before swapping the CTA - keeping the CTA in
+  sync with the slide instead of jumping in early. Update TRANSITION_DELAY near the
+  top of the <script> block below if the rive transition timing ever changes.
+
   Wired for this exact markup:
     <div id="press-hero" class="press-featured-rive">
       <canvas id="press-rive-canvas"></canvas>
@@ -80,15 +86,19 @@
       console.warn(LOG_PREFIX, "no elements matched " + CTA_SELECTOR + " - CTA cards not found yet?");
     }
 
-    var current = null;
+    // The rive file's own book-to-book transition takes this long (seconds).
+    // The "book" data value flips as soon as that transition *starts*, so we
+    // hold off swapping the CTA card until it's actually finished - otherwise
+    // the CTA jumps in a beat ahead of the slide it belongs to. Applies the
+    // same way whether the transition was triggered by the autoplay loop or
+    // a manual click, since both drive the same "book" property.
+    var TRANSITION_DELAY = 0.5;
 
-    function showBook(num) {
-      // Rive can report a transient NaN for a frame or two around a value
-      // change - ignore those instead of treating them as "no book selected"
-      // (which was hiding every card immediately after it faded in).
-      if (typeof num !== "number" || Number.isNaN(num)) return;
-      num = Math.min(TOTAL_BOOKS, Math.max(1, Math.round(num)));
-      if (num === current) return;
+    var current = null;      // book number currently shown on screen
+    var pendingTarget = null; // book number queued to show once the delay elapses
+    var pendingCall = null;   // gsap.delayedCall for that queued swap
+
+    function applyBook(num) {
       current = num;
       console.log(LOG_PREFIX, "showing book", num);
 
@@ -101,6 +111,36 @@
           duration: isMatch ? 0.4 : 0.3,
           ease: "power1.out"
         });
+      });
+    }
+
+    function showBook(num, immediate) {
+      // Rive can report a transient NaN for a frame or two around a value
+      // change - ignore those instead of treating them as "no book selected"
+      // (which was hiding every card immediately after it faded in).
+      if (typeof num !== "number" || Number.isNaN(num)) return;
+      num = Math.min(TOTAL_BOOKS, Math.max(1, Math.round(num)));
+
+      if (immediate) {
+        if (pendingCall) pendingCall.kill();
+        pendingCall = null;
+        pendingTarget = null;
+        if (num !== current) applyBook(num);
+        return;
+      }
+
+      if (num === current || num === pendingTarget) return;
+
+      // A new target book - (re)schedule the swap so the CTA appears in sync
+      // with the end of Rive's own transition, not the instant the "book"
+      // data value changes. Rescheduling (rather than letting an older timer
+      // fire) matters if the value keeps moving before the first one lands.
+      pendingTarget = num;
+      if (pendingCall) pendingCall.kill();
+      pendingCall = gsap.delayedCall(TRANSITION_DELAY, function () {
+        pendingCall = null;
+        pendingTarget = null;
+        applyBook(num);
       });
     }
 
@@ -129,10 +169,10 @@
         console.log(LOG_PREFIX, "bound to ViewModel1.book, initial value:", bookProp.value);
 
         // Show whichever book is already active as soon as we bind (covers a
-        // mid-loop page load), then react to every subsequent change - the
-        // same "book" property updates whether it's the autoplay loop or a
-        // click on a book driving the state machine.
-        showBook(bookProp.value);
+        // mid-loop page load) - no transition delay here, there's no slide
+        // animation to wait for on first paint. Every subsequent change (loop
+        // or click) goes through the delayed path in showBook().
+        showBook(bookProp.value, true);
         // Re-read bookProp.value directly rather than trusting the event
         // payload shape - more reliable across Rive runtime versions.
         bookProp.on(function () {
