@@ -7,25 +7,34 @@
   this script fades the matching ".press-featured-card.book-N" wrapper in and fades
   every other one out.
 
+  Wired for this exact markup:
+    <div id="press-hero" class="press-featured-rive">
+      <canvas id="press-rive-canvas"></canvas>
+    </div>
+    <div class="press-featured-card book-1">...</div> ... book-8
+  .riv source: https://cdn.prod.website-files.com/64f420094266acf96b6d3f84/6a5c8dcbc665c6e54962b20d_flagright_press_hero.riv
+
   Setup in Webflow:
 
   1. Site Settings > Custom Code > Head Code - paste the two <script src> tags below
      once for the whole site (skip if GSAP/Rive are already loaded there).
 
-  2. On the page with the Rive embed, give the actual <canvas> (or the Embed element
-     wrapping it) the ID "book-rive-canvas". In Webflow: select the element ->
-     Element Settings (gear icon) -> ID field.
+  2. Page Settings > Custom Code > Before </body> tag (on the page with the Rive
+     embed) - paste the <style> + <script> block below as-is, no placeholders left
+     to fill in.
 
-  3. Confirm the 8 CTA cards already exist with the combo classes described:
-     "press-featured-card book-1" ... "press-featured-card book-8".
+  3. Publish the site. Custom code changes do not apply until you publish, even if
+     the canvas/CTAs already look right in the Designer/preview.
 
-  4. Page Settings > Custom Code > Before </body> tag - paste the <style> + <script>
-     block below. Replace REPLACE_WITH_YOUR_RIV_FILE_URL with the hosted .riv URL
-     (Webflow Asset Manager URL, or wherever the file is hosted).
-
-  5. In Rive, double check "Artboard" has "ViewModel1" set as its default view model
+  4. In Rive, double check "Artboard" has "ViewModel1" set as its default view model
      instance - that's what lets `autoBind: true` pick up the "book" number property
-     automatically, with no manual instance wiring.
+     automatically, with no manual instance wiring. If it isn't the default, the
+     console will log "no default view model bound".
+
+  Debugging: open the browser console on the live page. This script logs exactly
+  where it stops (canvas missing / no view model / no "book" property / rive load
+  error) and logs every book change it applies, so a silent "nothing happens" case
+  should no longer be silent.
 -->
 
 <!-- ============ 1) Head Code (once per site) ============ -->
@@ -44,25 +53,40 @@
 
 <script>
 (function () {
-  var CANVAS_ID = "book-rive-canvas";
+  var CANVAS_ID = "press-rive-canvas";
   var CTA_SELECTOR = ".press-featured-card";
   var TOTAL_BOOKS = 8;
-  var RIVE_SRC = "REPLACE_WITH_YOUR_RIV_FILE_URL";
+  var RIVE_SRC = "https://cdn.prod.website-files.com/64f420094266acf96b6d3f84/6a5c8dcbc665c6e54962b20d_flagright_press_hero.riv";
+  var LOG_PREFIX = "[rive-book-cta]";
 
   document.addEventListener("DOMContentLoaded", function () {
+    if (typeof gsap === "undefined") {
+      console.error(LOG_PREFIX, "gsap is not loaded - check the Head Code script tag/order");
+      return;
+    }
+    if (typeof rive === "undefined") {
+      console.error(LOG_PREFIX, "rive is not loaded - check the Head Code script tag/order");
+      return;
+    }
+
     var canvas = document.getElementById(CANVAS_ID);
     if (!canvas) {
-      console.warn("[rive-book-cta] canvas #" + CANVAS_ID + " not found on this page");
+      console.error(LOG_PREFIX, "canvas #" + CANVAS_ID + " not found on this page");
       return;
     }
 
     var cards = gsap.utils.toArray(CTA_SELECTOR);
+    if (!cards.length) {
+      console.warn(LOG_PREFIX, "no elements matched " + CTA_SELECTOR + " - CTA cards not found yet?");
+    }
+
     var current = null;
 
     function showBook(num) {
       num = Math.min(TOTAL_BOOKS, Math.max(1, Math.round(num)));
       if (num === current) return;
       current = num;
+      console.log(LOG_PREFIX, "showing book", num);
 
       cards.forEach(function (card) {
         var isMatch = card.classList.contains("book-" + num);
@@ -82,18 +106,23 @@
       autoplay: true,
       stateMachines: "State Machine 1",
       autoBind: true,
+      onLoadError: function (err) {
+        console.error(LOG_PREFIX, "failed to load .riv file", err);
+      },
       onLoad: function () {
         var vmi = r.viewModelInstance;
         if (!vmi) {
-          console.warn("[rive-book-cta] no default view model bound - check the artboard's default ViewModel in Rive");
+          console.error(LOG_PREFIX, "no default view model bound - open the .riv in Rive and set ViewModel1 as the Artboard's default view model");
           return;
         }
 
         var bookProp = vmi.number("book");
         if (!bookProp) {
-          console.warn('[rive-book-cta] number property "book" not found on ViewModel1');
+          console.error(LOG_PREFIX, 'number property "book" not found on ViewModel1 - check the exact property name/casing');
           return;
         }
+
+        console.log(LOG_PREFIX, "bound to ViewModel1.book, initial value:", bookProp.value);
 
         // Show whichever book is already active as soon as we bind (covers a
         // mid-loop page load), then react to every subsequent change - the
@@ -102,6 +131,14 @@
         showBook(bookProp.value);
         bookProp.on(function (event) {
           showBook(event.data);
+        });
+
+        // Belt-and-suspenders: also poll every tick in case this Rive build's
+        // .on() observer doesn't fire for changes driven internally by the
+        // state machine. showBook() is idempotent (no-ops when unchanged),
+        // so this is safe to run alongside the event subscription above.
+        gsap.ticker.add(function () {
+          showBook(bookProp.value);
         });
       }
     });
