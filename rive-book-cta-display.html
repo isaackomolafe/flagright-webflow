@@ -83,6 +83,10 @@
     var current = null;
 
     function showBook(num) {
+      // Rive can report a transient NaN for a frame or two around a value
+      // change - ignore those instead of treating them as "no book selected"
+      // (which was hiding every card immediately after it faded in).
+      if (typeof num !== "number" || Number.isNaN(num)) return;
       num = Math.min(TOTAL_BOOKS, Math.max(1, Math.round(num)));
       if (num === current) return;
       current = num;
@@ -129,8 +133,10 @@
         // same "book" property updates whether it's the autoplay loop or a
         // click on a book driving the state machine.
         showBook(bookProp.value);
-        bookProp.on(function (event) {
-          showBook(event.data);
+        // Re-read bookProp.value directly rather than trusting the event
+        // payload shape - more reliable across Rive runtime versions.
+        bookProp.on(function () {
+          showBook(bookProp.value);
         });
 
         // Belt-and-suspenders: also poll every tick in case this Rive build's
